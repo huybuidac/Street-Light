@@ -14,7 +14,7 @@ const String APPLICATION_KEY = "sOTRpZFpcmFQpjeKFLrMqGAvvuoTIf85";
 char httpResponse[150];
 
 //Setting JSON data
-const byte JSON_SIZE = 2;
+const byte JSON_SIZE = 1;
 HashType<char*,char*> hashRawArray[JSON_SIZE];
 HashMap<char*,char*> jsonData = HashMap<char*,char*>(hashRawArray,JSON_SIZE);
 
@@ -31,19 +31,42 @@ String jsonToString(HashMap<char*,char*> jsonData){
     return data;
 }
 
+//Read String from Serial 2
+String readStringFromSerial2() {
+    while (!Serial2.available()); //wait for user input
+    //there is something in the buffer now
+    String str = "";
+    while (Serial2.available()) {
+        str += (char) Serial2.read();
+        delay(1); //wait for the next byte, if after this nothing has arrived it means the text was not part of the same stream entered by the user
+    }
+    return str;
+}
+
 //Check if SERVER is connected with AT+CIPSTART
 boolean serverConnected(){
     String cmd = "AT+CIPSTART=\"TCP\",\"";
     cmd += SERVER;
     cmd += "\",80";
     Serial2.println(cmd);
-    //delay(3000);
-    if(Serial2.find("Error")){
-        Serial.println("Connect Server Fail...");
-        return false;
-    } else {
-        Serial.println("Server connected...");
+    Serial2.find("AT+CIPSTART=\"TCP\",\"lightoflife.azure-mobile.net\",80");
+    delay(500);
+    String s = readStringFromSerial2();
+    Serial.println("[Start]"+s+"[End]");
+    Serial.println("- ready index:" + String(s.indexOf("ALREADY CONNECTED\r\n\r\nERROR")));
+    Serial.println("- connect index:" + String(s.indexOf("CONNECT\r\n\r\nOK")));
+    if (s.indexOf("ALREADY CONNECTED\r\n\r\nERROR")>=0) {
+        Serial.println("Server already connected");
+        s="";
         return true;
+    } else if(s.indexOf("CONNECT\r\n\r\nOK")>=0){
+        Serial.println("Server connected");
+        s="";
+        return true;
+    } else {
+        Serial.println("Cannot connect to server");
+        s="";
+        return false;
     }
 }
 
@@ -60,17 +83,20 @@ void insertData(String JSON_DATA){
         cmd += JSON_DATA + "\r\n\r\n";
         
         Serial2.println("AT+CIPSEND=" + String(cmd.length()));
-        if(Serial2.find(">")){
+        while (!Serial2.available());
+        if(Serial2.find("OK\r\n>")){
             Serial2.print(cmd);
-            Serial.print(cmd);
-            Serial.println("Insert Command sent...");
-            delay(6000);
+            while (!Serial2.available());
+            Serial.println("Insert Command sent");
             if(Serial2.find("201")){
                 Serial.println("Respond OK");
             }
+            //clear response in serial
+            while (Serial2.available()) {
+                Serial2.read();
+            }
         } else {
-            Serial2.println("AT+CIPCLOSE");
-            Serial.println("CIPSEND error! Connection closed...");
+            Serial.println("CIPSEND error");
         }
     }
 }
@@ -85,11 +111,15 @@ String getData(String ID){
         cmd += "Host: " + SERVER + "\r\n\r\n";
         
         Serial2.println("AT+CIPSEND=" + String(cmd.length()));
-        if(Serial2.find(">")){
+        if(Serial2.find("OK\r\n>")){
             Serial2.print(cmd);
-            Serial.print(cmd);
+            while (!Serial2.available());
+            //clear response in serial
+            while (Serial2.available()) {
+                Serial2.read();
+            }
         }else{
-            Serial.println("CIPSEND error! Connection closed...");
+            Serial.println("CIPSEND error");
         }
         
         
@@ -140,73 +170,111 @@ String getData(String ID){
     }
 }
 
-//Check if connected to wifi
-boolean connectWifi(){
-    Serial2.println("AT+CWMODE=1");
-
-    delay(1000);
-    Serial2.println("AT+CWJAP?");
-    delay(2000);
-    if(Serial2.find("No AP")){
-        String cmd="AT+CWJAP=\"";
-        cmd+=SSID;
-        cmd+="\",\"";
-        cmd+=PASS;
-        cmd+="\"";
-        Serial2.println(cmd);
+//Update data to Azure
+void updateData(String itemID, String JSON_DATA){
+    if(serverConnected()){
+        String cmd = "PATCH https://" + SERVER;
+        cmd += "/tables/"+ TABLE_NAME;
+        cmd += "/" + itemID;
+        cmd += " HTTP/1.1\r\n";
+        cmd += "X-ZUMO-APPLICATION: " + APPLICATION_KEY + "\r\n";
+        cmd += "Host: " + SERVER + "\r\n";
+        cmd += "Content-Type: application/json\r\n";
+        cmd += "Content-Length: " + String(JSON_DATA.length()) + "\r\n\r\n";
+        cmd += JSON_DATA + "\r\n\r\n";
         
-        delay(5000);
-        if(Serial2.find("OK")){
-            Serial.println("Connected to Wifi");
-            return true;
-        }else{
-            Serial.println("Fail to connect Wifi");
-            return false;
+        Serial2.println("AT+CIPSEND=" + String(cmd.length()));
+        while (!Serial2.available());
+        if(Serial2.find("OK\r\n>")){
+            Serial2.print(cmd);
+            while (!Serial2.available());
+            Serial.println("Insert Command sent");
+            if(Serial2.find("200 OK")){
+                Serial.println("Respond OK---------");
+            }
+            //clear response in serial
+            while (Serial2.available()) {
+                Serial2.read();
+            }
+        } else {
+            Serial.println("CIPSEND error");
         }
-    } else{
-        Serial.println("Already connected to wifi...");
-        return true;
     }
 }
+
+//Check if connected to wifi
+void connectWifi(){
+    boolean connected = false;
+    Serial2.println("AT+CWMODE=1");
+    delay(500);
+    while (!connected) {
+        Serial2.println("AT+CWJAP?");
+        if(Serial2.find("No AP\r\n\r\nOK")){
+            String cmd="AT+CWJAP=\"";
+            cmd+=SSID;
+            cmd+="\",\"";
+            cmd+=PASS;
+            cmd+="\"";
+            Serial2.println(cmd);
+            delay(5000);
+            if(Serial2.find("WIFI CONNECTED\r\nWIFI GOT IP\r\n\r\nOK")){
+                Serial.println("Connected to Wifi");
+                connected = true;
+            } else{
+                Serial.println("Fail to connect wifi, trying again...");
+                while (!Serial2.available());
+            }
+        } else{
+            Serial.println("Already connected to wifi...");
+            connected = true;
+        }
+    }
+}
+
+
 
 void setup() {
     
     Serial2.begin(115200);
     Serial.begin(9600);
     pinMode(LED, OUTPUT);
-    Serial2.println("AT");
-    delay(1000);
-    if(Serial2.find("OK")){
-        Serial.println("Connecting...");
-        boolean wifiConnected = connectWifi();
-        while(!wifiConnected){
-            Serial.println("Try to connect Wifi again!");
+    
+    boolean wifiReady = false;
+    while (!wifiReady) {
+        Serial2.println("AT");
+        while (!Serial2.available());
+        if(Serial2.find("OK")){
+            wifiReady=true;
             connectWifi();
+        }else{
+            Serial.println("Cannot connect to Wifi Module, trying again...");
+            delay(3000);
         }
-    }else{
-        Serial.println("Cannot connect to Wifi Module");
-        delay(10000);
     }
 }
 
 void loop() {
 //    int LDR_value1 = analogRead(LDR1);
 //    String data = String(LDR_value1);
+    // Check INSERT
+//    jsonData[0]("id","1");
+//    jsonData[1]("status","off");
+//    insertData(jsonToString(jsonData));
     
-    jsonData[0]("id","1");
-    jsonData[1]("status","off");
-    insertData(jsonToString(jsonData));
+    // Check UPDATE
+    jsonData[0]("status","update");
+    updateData("1", jsonToString(jsonData));
     
-    // Get data
-    String status = getData("1");
-    Serial.println("Status: " + status);
-    if(status=="on"){
-        Serial.println("true on");
-        digitalWrite(LED, HIGH);
-    } else {
-        digitalWrite(LED, LOW);
-    }
-        
+//    // Check GET
+//    String status = getData("1");
+//    Serial.println("Status: " + status);
+//    if(status=="on"){
+//        Serial.println("true on");
+//        digitalWrite(LED, HIGH);
+//    } else {
+//        digitalWrite(LED, LOW);
+//    }
+    
     delay(5000);
 }
 
